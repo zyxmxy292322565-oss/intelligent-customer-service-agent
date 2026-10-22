@@ -37,7 +37,7 @@ jobs:
           python-version: "3.11"
           cache: pip
       - name: Install dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt -r frontend/requirements.txt
       - name: Syntax check
         run: python -m compileall -q .
       - name: Agent mock and isolated MySQL tests
