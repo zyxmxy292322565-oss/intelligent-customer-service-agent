@@ -1,0 +1,44 @@
+name: Agent CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci_test_password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci_test_password"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    env:
+      APP_ENV: test
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_PORT: 3306
+      MYSQL_USER: root
+      MYSQL_PASSWORD: ci_test_password
+      MYSQL_DATABASE: ci_unused_default
+      REDIS_HOST: 127.0.0.1
+      DEEPSEEK_API_KEY: ""
+      RUN_AGENT_MYSQL_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+      - name: Syntax check
+        run: python -m compileall -q .
+      - name: Agent mock and isolated MySQL tests
+        run: python -m tests.run_agent_tests

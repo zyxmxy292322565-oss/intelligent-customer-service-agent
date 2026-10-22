@@ -1,0 +1,189 @@
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-development}
+  USE_LANGGRAPH_AGENT: ${USE_LANGGRAPH_AGENT:-false}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY:-}
+  JWT_ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+  ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+  MYSQL_HOST: mysql
+  MYSQL_PORT: 3306
+  MYSQL_DATABASE: ${MYSQL_DATABASE:-consumer_service_agent}
+  MYSQL_USER: ${MYSQL_APP_USER:-agent}
+  MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD:?Set MYSQL_APP_PASSWORD in .env}
+  MYSQL_CONNECT_TIMEOUT: ${MYSQL_CONNECT_TIMEOUT:-3}
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  REDIS_DB: 0
+  REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+  REDIS_SOCKET_TIMEOUT: ${REDIS_SOCKET_TIMEOUT:-2}
+  REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-consumer_agent}
+  REDIS_RATE_LIMIT_TTL_SECONDS: ${REDIS_RATE_LIMIT_TTL_SECONDS:-600}
+  AGENT_GLOBAL_CAPACITY: ${AGENT_GLOBAL_CAPACITY:-100}
+  AGENT_GLOBAL_RATE: ${AGENT_GLOBAL_RATE:-20}
+  AGENT_USER_CAPACITY: ${AGENT_USER_CAPACITY:-5}
+  AGENT_USER_RATE: ${AGENT_USER_RATE:-1}
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+  DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
+  DEEPSEEK_API_BASE: ${DEEPSEEK_API_BASE:-}
+  DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-}
+  MODEL: ${MODEL:-}
+  POLICY_RAG_SERVICE_URL: http://policy-rag:8000
+  POLICY_RAG_TIMEOUT_SECONDS: ${POLICY_RAG_TIMEOUT_SECONDS:-8}
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-consumer_service_agent}
+      MYSQL_USER: ${MYSQL_APP_USER:-agent}
+      MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD:?Set MYSQL_APP_PASSWORD in .env}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "3308:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysql --protocol=tcp -h 127.0.0.1 -u\"$$MYSQL_USER\" --password=\"$$MYSQL_PASSWORD\" \"$$MYSQL_DATABASE\" -e 'SELECT 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping 2>/dev/null | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  migrate:
+    build: .
+    command: ["python", "-m", "infra.bootstrap"]
+    environment: *app-env
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+
+  policy-rag-db-init:
+    build: .
+    command: ["python", "-m", "infra.init_policy_rag_db"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_APP_USER: ${MYSQL_APP_USER:-agent}
+      RAG_MYSQL_USER: ${RAG_MYSQL_USER:-rag_agent}
+      RAG_MYSQL_PASSWORD: ${RAG_MYSQL_PASSWORD:-local-dev-rag-only-change-me}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+
+  policy-rag:
+    build:
+      context: ../demo3_rag_qa
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: rag_demo
+      MYSQL_USER: ${RAG_MYSQL_USER:-rag_agent}
+      MYSQL_PASSWORD: ${RAG_MYSQL_PASSWORD:-local-dev-rag-only-change-me}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: ${RAG_REDIS_DB:-1}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_API_BASE: ${DEEPSEEK_API_BASE:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+    expose:
+      - "8000"
+    volumes:
+      - ../demo3_rag_qa/cache:/app/cache
+      - policy_rag_model_cache:/root/.cache/huggingface
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      policy-rag-db-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 30s
+      timeout: 6s
+      retries: 5
+      start_period: 300s
+
+  backend:
+    build: .
+    environment: *app-env
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=4)"]
+      interval: 15s
+      timeout: 6s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "${FRONTEND_PORT:-8501}:8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=4)"]
+      interval: 15s
+      timeout: 6s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  admin-workbench:
+    build: ./frontend
+    command: ["streamlit", "run", "admin_app.py", "--server.address=0.0.0.0", "--server.port=8502", "--server.headless=true"]
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "127.0.0.1:${ADMIN_FRONTEND_PORT:-8502}:8502"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8502/_stcore/health', timeout=4)"]
+      interval: 15s
+      timeout: 6s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+  redis_data:
+  policy_rag_model_cache:

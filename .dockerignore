@@ -1,0 +1,14 @@
+.env
+.env.*
+venv
+.venv
+__pycache__
+*.pyc
+.git
+.github
+tests
+test_*.py
+agent/test_*.py
+cache/test_*.py
+tools/test_*.py
+data
